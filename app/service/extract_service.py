@@ -36,7 +36,7 @@ def extract_pdf_with_gemini(uploaded_pdf, db, original_filename: str):
 
     # Otherwise call Gemini
     pdf_bytes = uploaded_pdf.read()
-    model = genai.GenerativeModel("gemini-2.5-pro")
+    model = genai.GenerativeModel("gemini-2.5-flash")
     logger.info(f"Calling Gemini for bank statement extraction: {original_filename}")
 
     response = model.generate_content(
@@ -58,10 +58,12 @@ def extract_pdf_with_gemini(uploaded_pdf, db, original_filename: str):
     extracted_json = json.loads(response.text)
 
     # Save to DB
-    account_id = save_bank_statement(db, extracted_json)
-    logger.info(f"Bank statement saved to DB with account_id: {account_id}")
+    
+    
     # Save JSON output to cache for future use
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(extracted_json, f, indent=2, ensure_ascii=False)
+
+    account_id = save_bank_statement(db, extracted_json)
 
     return account_id, json_path, extracted_json
