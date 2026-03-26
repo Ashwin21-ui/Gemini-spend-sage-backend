@@ -7,3 +7,4 @@ check_db_data.py
 diagonose_db.py
 *.md
 data/
+logs/

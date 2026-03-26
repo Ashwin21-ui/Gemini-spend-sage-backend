@@ -6,8 +6,45 @@ Strategy: 5 transactions per chunk with 1 transaction overlap
 from typing import List, Dict, Any
 from datetime import date
 from app.utils.logger import get_logger
+import json
 
 logger = get_logger(__name__)
+
+
+def format_chunk_as_json(transactions: List[Dict[str, Any]]) -> str:
+    """
+    Format transactions as structured JSON for better LLM understanding.
+    
+    Args:
+        transactions: List of transaction dictionaries
+    
+    Returns:
+        Formatted JSON string with transaction details
+    """
+    formatted_txs = []
+    
+    for idx, tx in enumerate(transactions, 1):
+        formatted_tx = {
+            "sequence": idx,
+            "date": str(tx.get('date', 'Unknown')),
+            "description": tx.get('description', ''),
+            "amount": float(tx.get('amount_value', 0)),
+            "type": tx.get('type', 'Unknown'),
+            "balance": float(tx.get('balance_value', 0)) if tx.get('balance_value') else None,
+        }
+        formatted_txs.append(formatted_tx)
+    
+    # Create structured chunk
+    chunk_data = {
+        "transaction_count": len(transactions),
+        "transactions": formatted_txs,
+        "summary": {
+            "total_amount": sum(float(tx.get('amount_value', 0)) for tx in transactions),
+            "date_range": f"{transactions[0].get('date', 'Unknown')} to {transactions[-1].get('date', 'Unknown')}" if transactions else "Unknown"
+        }
+    }
+    
+    return json.dumps(chunk_data, indent=2)
 
 
 class ChunkData:
@@ -79,9 +116,8 @@ def chunk_transactions(
         chunk_amounts = [float(tx.get('amount_value', 0)) for tx in chunk_txs]
         chunk_dates = [tx.get('date') for tx in chunk_txs]
         
-        # Create chunk text: concatenate descriptions
-        chunk_descriptions = [tx.get('description', '') for tx in chunk_txs]
-        chunk_text = " | ".join(chunk_descriptions)
+        # Create detailed structured chunk text with all transaction info
+        chunk_text = format_chunk_as_json(chunk_txs)
         
         # Create date range string
         first_date = chunk_dates[0] if chunk_dates[0] else "Unknown"
