@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from app.routes.upload import router as upload_router
+from app.routes.search import router as search_router
 import uvicorn
 
 app = FastAPI()
@@ -16,6 +17,7 @@ app.add_middleware(
 )
 
 app.include_router(upload_router, prefix="/api")
+app.include_router(search_router, prefix="/api")
 
 
 if __name__ == "__main__":

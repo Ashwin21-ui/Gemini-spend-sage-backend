@@ -1,17 +1,10 @@
-# Import ORM models and Pydantic schemas from their respective modules
-from app.models import AccountDetails, Transaction, User, Chunk
+"""Schema layer - Pydantic models for API requests/responses"""
 from app.schema.user import UserBase, UserCreate, UserResponse
 from app.schema.transaction import TransactionBase, TransactionCreate, TransactionResponse
 from app.schema.account import AccountDetailsBase, AccountDetailsCreate, AccountDetailsResponse
 from app.schema.chunk import ChunkBase, ChunkCreate, ChunkResponse
 
-# Re-export for backward compatibility
 __all__ = [
-    # ORM Models
-    "User",
-    "AccountDetails",
-    "Transaction",
-    "Chunk",
     # User Schemas
     "UserBase",
     "UserCreate",

@@ -1,0 +1,9 @@
+__pycache__
+.env
+.venv
+test.py
+add_dummy_user.py
+check_db_data.py
+diagonose_db.py
+*.md
+data/
