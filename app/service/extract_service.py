@@ -6,7 +6,7 @@ Flow:
   2. On cache miss → call Gemini 2.5 Flash in a thread pool (non-blocking)
   3. Validate extracted JSON structure
   4. Persist cache to data/ directory
-  5. Save to database via save_bank_statement_async
+  5. Save to database via save_bank_statement
 """
 
 import json
@@ -20,7 +20,7 @@ import google.generativeai as genai
 
 from app.core.config import get_settings
 from app.prompts.extract_bank_statement import BANK_STATEMENT_PROMPT
-from app.repository.bank_repo_async import save_bank_statement_async
+from app.repository.bank_repo import save_bank_statement
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -54,7 +54,7 @@ Return ONLY a valid JSON object — no markdown, no extra text:
 # Public async entry point
 # ---------------------------------------------------------------------------
 
-async def extract_pdf_with_gemini_async(
+async def extract_pdf_with_gemini(
     uploaded_pdf,
     db: Session,
     original_filename: str,
@@ -110,7 +110,7 @@ async def extract_pdf_with_gemini_async(
 
     # ── Persist to database ──────────────────────────────────────────────────
     logger.info("Saving to database | file=%s", original_filename)
-    account_id = await save_bank_statement_async(db, extracted_json, user_id)
+    account_id = await save_bank_statement(db, extracted_json, user_id)
     logger.info("Extraction complete | account_id=%s | file=%s", account_id, original_filename)
 
     return account_id, str(json_path), extracted_json

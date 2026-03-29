@@ -101,28 +101,13 @@ class ChatResponse:
     pipeline_steps: List[str]
 
 
-# ---------------------------------------------------------------------------
-# Public async entry point
-# ---------------------------------------------------------------------------
-
 async def chat_with_statements(
     db: Session,
+    user_id: UUID,
     account_id: UUID,
     query: str,
     top_k: int = 5,
 ) -> ChatResponse:
-    """
-    GraphRAG pipeline: guardrails → dual search → rerank → graph expand → LLM answer.
-
-    Args:
-        db:         Active SQLAlchemy session.
-        account_id: UUID of the account to search within.
-        query:      Raw user question.
-        top_k:      Number of top chunks to use for answer generation.
-
-    Returns:
-        ChatResponse with the answer and full pipeline metadata.
-    """
     steps: List[str] = []
     loop = asyncio.get_running_loop()
 
@@ -161,12 +146,12 @@ async def chat_with_statements(
 
     # Each executor thread gets its own DB session to avoid concurrent-access errors
     def semantic_task():
-        return _semantic_search_sync(db, account_id, query_embedding, 10)
+        return _semantic_search_sync(db, user_id, account_id, query_embedding, 10)
 
     def keyword_task():
         kw_db = SessionLocal()
         try:
-            return _keyword_search_sync(kw_db, account_id, query, query_embedding, 10)
+            return _keyword_search_sync(kw_db, user_id, account_id, query, query_embedding, 10)
         finally:
             kw_db.close()
 
@@ -275,6 +260,7 @@ def _run_guardrail_sync(query: str) -> GuardrailResult:
 
 def _semantic_search_sync(
     db: Session,
+    user_id: UUID,
     account_id: UUID,
     query_embedding: List[float],
     limit: int,
@@ -289,13 +275,14 @@ def _semantic_search_sync(
             1 - (description_embedding <=> :query_embedding) AS similarity
         FROM chunks
         WHERE account_id = :account_id
+          AND user_id = :user_id
           AND description_embedding IS NOT NULL
         ORDER BY description_embedding <=> :query_embedding
         LIMIT :limit
     """)
     rows = db.execute(
         sql,
-        {"query_embedding": embedding_str, "account_id": str(account_id), "limit": limit},
+        {"query_embedding": embedding_str, "account_id": str(account_id), "user_id": str(user_id), "limit": limit},
     ).fetchall()
 
     return [
@@ -321,6 +308,7 @@ def _semantic_search_sync(
 
 def _keyword_search_sync(
     db: Session,
+    user_id: UUID,
     account_id: UUID,
     query: str,
     query_embedding: List[float],
@@ -340,6 +328,7 @@ def _keyword_search_sync(
     )
     params: Dict[str, Any] = {
         "account_id": str(account_id),
+        "user_id": str(user_id),
         "query_embedding": str(query_embedding),
         "limit": limit,
     }
@@ -354,6 +343,7 @@ def _keyword_search_sync(
             1 - (description_embedding <=> :query_embedding) AS similarity
         FROM chunks
         WHERE account_id = :account_id
+          AND user_id = :user_id
           AND ({like_clauses})
         ORDER BY similarity DESC
         LIMIT :limit

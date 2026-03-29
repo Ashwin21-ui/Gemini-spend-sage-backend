@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.db.base import SessionLocal
 from app.service.chatbot_service import chat_with_statements
 from app.utils.logger import get_logger
+from app.utils.security import get_current_user_id
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -31,6 +32,7 @@ async def chat_endpoint(
     query: str = Query(..., description="Natural language question about the bank statement"),
     top_k: int = Query(5, ge=1, le=10, description="Number of top chunks for context (1–10)"),
     db: Session = Depends(get_db),
+    current_user_id: UUID = Depends(get_current_user_id),
 ):
     """
     GraphRAG chat endpoint — ask natural language questions about a bank statement.
@@ -66,6 +68,7 @@ async def chat_endpoint(
     try:
         result = await chat_with_statements(
             db=db,
+            user_id=current_user_id,
             account_id=account_uuid,
             query=query.strip(),
             top_k=top_k,

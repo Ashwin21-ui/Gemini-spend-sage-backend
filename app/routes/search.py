@@ -13,6 +13,7 @@ import asyncio
 from app.db.base import SessionLocal
 from app.db.vector import embed_text
 from app.utils.logger import get_logger
+from app.utils.security import get_current_user_id
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -30,6 +31,7 @@ def get_db():
 def _search_chunks_sync(
     db: Session,
     query: str,
+    user_id: str,
     account_id: UUID,
     limit: int = 5
 ) -> list:
@@ -55,13 +57,14 @@ def _search_chunks_sync(
                 1 - (description_embedding <=> :query_embedding) as similarity
             FROM chunks
             WHERE account_id = :account_id
+            AND user_id = :user_id
             ORDER BY similarity DESC
             LIMIT :limit
         """)
         
         results = db.execute(
             sql,
-            {"query_embedding": embedding_str, "account_id": str(account_id), "limit": limit}
+            {"query_embedding": embedding_str, "account_id": str(account_id), "user_id": user_id, "limit": limit}
         ).fetchall()
         
         return [dict(row._mapping) for row in results]
@@ -71,9 +74,10 @@ def _search_chunks_sync(
         raise
 
 
-async def search_chunks_async(
+async def search_chunks(
     db: Session,
     query: str,
+    user_id: UUID,
     account_id: UUID,
     limit: int = 5
 ) -> list:
@@ -84,6 +88,7 @@ async def search_chunks_async(
         _search_chunks_sync,
         db,
         query,
+        str(user_id),
         account_id,
         limit
     )
@@ -95,7 +100,8 @@ async def search_bank_statements(
     account_id: str = Query(..., description="UUID of the account"),
     query: str = Query(..., description="Search query"),
     limit: int = Query(5, ge=1, le=20),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user_id: UUID = Depends(get_current_user_id)
 ):
     """
     Search bank statement chunks using semantic similarity.
@@ -130,8 +136,8 @@ async def search_bank_statements(
         
         logger.info(f"Searching account {account_uuid}: '{query}'")
         
-        # Perform search
-        results = await search_chunks_async(db, query, account_uuid, limit)
+        # Perform search ensuring user boundary
+        results = await search_chunks(db, query, current_user_id, account_uuid, limit)
         
         if not results:
             logger.info(f"No results found for query: {query}")

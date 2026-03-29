@@ -11,17 +11,17 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes.upload_async import router as upload_router
-from app.routes.search_async import router as search_router
-from app.routes.chat_async import router as chat_router
+from app.routes.upload import router as upload_router
+from app.routes.search import router as search_router
+from app.routes.chat import router as chat_router
+from app.routes.auth import router as auth_router
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Lifespan (replaces deprecated @app.on_event)
-# ---------------------------------------------------------------------------
+# Lifespan
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,9 +33,9 @@ async def lifespan(app: FastAPI):
     logger.info("Spend Sage Backend shutting down")
 
 
-# ---------------------------------------------------------------------------
+
 # Application factory
-# ---------------------------------------------------------------------------
+
 
 app = FastAPI(
     title="Spend Sage Bank Statement API",
@@ -55,11 +55,9 @@ app.add_middleware(
 app.include_router(upload_router, prefix="/api", tags=["Upload"])
 app.include_router(search_router, prefix="/api", tags=["Search"])
 app.include_router(chat_router, prefix="/api", tags=["Chat"])
+app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 
 
-# ---------------------------------------------------------------------------
-# Root endpoint
-# ---------------------------------------------------------------------------
 
 @app.get("/", tags=["Meta"])
 async def root():
@@ -77,9 +75,6 @@ async def root():
     }
 
 
-# ---------------------------------------------------------------------------
-# Dev runner
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     uvicorn.run(

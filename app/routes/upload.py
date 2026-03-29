@@ -10,8 +10,10 @@ from uuid import UUID
 import logging
 
 from app.db.base import SessionLocal
-from app.service.extract_service_async import extract_pdf_with_gemini_async
+from app.service.extract_service import extract_pdf_with_gemini
 from app.utils.logger import get_logger
+from app.utils.security import get_current_user_id
+from app.utils.security import get_current_user_id
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -29,8 +31,8 @@ def get_db():
 @router.post("/upload-bank-statement")
 async def upload_bank_statement(
     file: UploadFile = File(...),
-    user_id: str = Query(..., description="UUID of the user"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user_uuid: UUID = Depends(get_current_user_id)
 ):
     """
     Upload a bank statement PDF for async extraction.
@@ -56,21 +58,12 @@ async def upload_bank_statement(
                 status_code=400,
                 detail="Only PDF files are supported"
             )
+        # JWT validator already verified the UUID and user identity
         
-        # Validate user_id format
-        try:
-            user_uuid = UUID(user_id)
-        except ValueError:
-            logger.warning(f"Invalid UUID format: {user_id}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid UUID format for user_id: {user_id}"
-            )
-        
-        logger.info(f"Processing upload for user {user_uuid}: {file.filename}")
+        logger.info(f"Processing upload for securely authenticated user {user_uuid}: {file.filename}")
         
         # Extract and save
-        account_id, json_path, extracted_json = await extract_pdf_with_gemini_async(
+        account_id, json_path, extracted_json = await extract_pdf_with_gemini(
             file.file,
             db,
             original_filename=file.filename,
