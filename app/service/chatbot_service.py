@@ -38,11 +38,11 @@ from uuid import UUID
 
 import google.generativeai as genai
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.base import SessionLocal
-from app.db.vector import embed_query as _embed_query_vec
+from app.db.vector import embed_query_async as _embed_query_vec
 from app.prompts.chatbot import ANSWER_PROMPT, GUARDRAIL_PROMPT
 from app.utils.logger import get_logger
 
@@ -102,7 +102,7 @@ class ChatResponse:
 
 
 async def chat_with_statements(
-    db: Session,
+    db: AsyncSession,
     user_id: UUID,
     account_id: UUID,
     query: str,
@@ -138,26 +138,21 @@ async def chat_with_statements(
 
     # ── Step 2: Embed query ───────────────────────────────────────────────────
     steps.append("query_embedding")
-    query_embedding: List[float] = await loop.run_in_executor(None, _embed_query_vec, query)
+    query_embedding: List[float] = await _embed_query_vec(query)
     logger.info("Query embedded | dims=%d", len(query_embedding))
 
     # ── Steps 3a + 3b: Dual search (parallel, separate sessions) ─────────────
     steps.append("dual_search")
 
     # Each executor thread gets its own DB session to avoid concurrent-access errors
-    def semantic_task():
-        return _semantic_search_sync(db, user_id, account_id, query_embedding, 10)
+    async def semantic_task():
+        return await _semantic_search(db, user_id, account_id, query_embedding, 10)
 
-    def keyword_task():
-        kw_db = SessionLocal()
-        try:
-            return _keyword_search_sync(kw_db, user_id, account_id, query, query_embedding, 10)
-        finally:
-            kw_db.close()
+    async def keyword_task():
+        async with SessionLocal() as kw_db:
+            return await _keyword_search(kw_db, user_id, account_id, query, query_embedding, 10)
 
-    semantic_future = loop.run_in_executor(None, semantic_task)
-    keyword_future = loop.run_in_executor(None, keyword_task)
-    semantic_results, keyword_results = await asyncio.gather(semantic_future, keyword_future)
+    semantic_results, keyword_results = await asyncio.gather(semantic_task(), keyword_task())
     logger.info(
         "Dual search complete | semantic=%d | keyword=%d",
         len(semantic_results), len(keyword_results),
@@ -179,9 +174,7 @@ async def chat_with_statements(
 
     # ── Step 6: Graph expansion ───────────────────────────────────────────────
     steps.append("graph_expansion")
-    context_chunks = await loop.run_in_executor(
-        None, _expand_graph_neighbors, db, reranked
-    )
+    context_chunks = await _expand_graph_neighbors(db, reranked)
     logger.info(
         "Graph expanded | direct_hits=%d | with_neighbors=%d",
         len(reranked), len(context_chunks),
@@ -255,11 +248,11 @@ def _run_guardrail_sync(query: str) -> GuardrailResult:
 
 
 # ---------------------------------------------------------------------------
-# Step 3a: Semantic search (sync — runs in thread pool)
+# Step 3a: Semantic search (asyncpg native)
 # ---------------------------------------------------------------------------
 
-def _semantic_search_sync(
-    db: Session,
+async def _semantic_search(
+    db: AsyncSession,
     user_id: UUID,
     account_id: UUID,
     query_embedding: List[float],
@@ -280,10 +273,11 @@ def _semantic_search_sync(
         ORDER BY description_embedding <=> :query_embedding
         LIMIT :limit
     """)
-    rows = db.execute(
+    result = await db.execute(
         sql,
         {"query_embedding": embedding_str, "account_id": str(account_id), "user_id": str(user_id), "limit": limit},
-    ).fetchall()
+    )
+    rows = result.fetchall()
 
     return [
         RetrievedChunk(
@@ -303,11 +297,11 @@ def _semantic_search_sync(
 
 
 # ---------------------------------------------------------------------------
-# Step 3b: Keyword search (sync — runs in thread pool)
+# Step 3b: Keyword search (asyncpg native)
 # ---------------------------------------------------------------------------
 
-def _keyword_search_sync(
-    db: Session,
+async def _keyword_search(
+    db: AsyncSession,
     user_id: UUID,
     account_id: UUID,
     query: str,
@@ -350,7 +344,8 @@ def _keyword_search_sync(
     """)
 
     try:
-        rows = db.execute(sql, params).fetchall()
+        result = await db.execute(sql, params)
+        rows = result.fetchall()
     except Exception as exc:
         logger.warning("Keyword search failed | error=%s", exc)
         return []
@@ -440,11 +435,11 @@ def _rerank(chunks: List[RetrievedChunk], query_terms: List[str]) -> List[Retrie
 
 
 # ---------------------------------------------------------------------------
-# Step 6: Graph expansion (sync — runs in thread pool)
+# Step 6: Graph expansion (asyncpg native)
 # ---------------------------------------------------------------------------
 
-def _expand_graph_neighbors(
-    db: Session,
+async def _expand_graph_neighbors(
+    db: AsyncSession,
     top_chunks: List[RetrievedChunk],
 ) -> List[RetrievedChunk]:
     """
@@ -481,7 +476,8 @@ def _expand_graph_neighbors(
             WHERE chunk_id IN ({placeholders})
             ORDER BY chunk_index
         """)
-        rows = db.execute(sql, params).fetchall()
+        result = await db.execute(sql, params)
+        rows = result.fetchall()
     except Exception as exc:
         logger.warning("Graph neighbor fetch failed | error=%s", exc)
         return list(top_chunks)

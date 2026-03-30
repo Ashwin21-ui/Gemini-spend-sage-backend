@@ -1,16 +1,11 @@
 """
 Async Bank Statement Repository
 
-Handles all database persistence for bank statements:
+Handles all database persistence for bank statements via native asyncpg mappings:
   - Account details
   - Individual transactions
   - Transaction chunks with vector embeddings
   - Chunk linked-list linking (previous_chunk / next_chunk)
-
-Architecture note:
-  SQLAlchemy's Session is NOT thread-safe, but it IS safe to run a single
-  session's operations in a dedicated thread via asyncio.to_thread() /
-  run_in_executor — which is exactly what we do here.
 """
 
 import asyncio
@@ -18,11 +13,12 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 from uuid import UUID
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
 from app.models import AccountDetails, Transaction, Chunk
 from app.service.chunking_service import chunk_transactions
-from app.db.vector import embed_text
+from app.db.vector import embed_text_async
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -46,64 +42,16 @@ def safe_parse_date(value: Optional[str]):
 
 
 # ---------------------------------------------------------------------------
-# Public async API
+# Public async API natively using AsyncSession (No thread wrappers)
 # ---------------------------------------------------------------------------
 
 async def save_bank_statement(
-    db: Session,
+    db: AsyncSession,
     data: Dict[str, Any],
     user_id: UUID,
 ) -> UUID:
     """
-    Persist a fully extracted bank statement to the database.
-
-    Runs all synchronous DB operations in a thread pool so the event loop
-    remains unblocked.
-
-    Args:
-        db:      Active SQLAlchemy session.
-        data:    Extracted bank statement dict (from Gemini).
-        user_id: UUID of the uploading user.
-
-    Returns:
-        UUID of the newly created AccountDetails record.
-    """
-    loop = asyncio.get_running_loop()
-    account_id = await loop.run_in_executor(
-        None, _save_bank_statement_sync, db, data, user_id
-    )
-    return account_id
-
-
-async def get_account_by_id(
-    db: Session, account_id: UUID
-) -> Optional[AccountDetails]:
-    """Async wrapper — fetch a single account by its UUID."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, _get_account_by_id_sync, db, account_id
-    )
-
-
-async def get_user_accounts(
-    db: Session, user_id: UUID
-) -> List[AccountDetails]:
-    """Async wrapper — fetch all accounts belonging to a user."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, _get_user_accounts_sync, db, user_id
-    )
-
-
-# ---------------------------------------------------------------------------
-# Synchronous DB workers (called via run_in_executor)
-# ---------------------------------------------------------------------------
-
-def _save_bank_statement_sync(
-    db: Session, data: Dict[str, Any], user_id: UUID
-) -> UUID:
-    """
-    Full synchronous save:
+    Full asynchronous save:
       1. Create AccountDetails record
       2. Create Transaction records
       3. Chunk transactions (size=5, overlap=1)
@@ -127,7 +75,7 @@ def _save_bank_statement_sync(
         currency=account_data.get("currency"),
     )
     db.add(account_record)
-    db.flush()  # obtain account_record.id before inserting child rows
+    await db.flush()  # obtain account_record.id before inserting child rows
 
     # ── 2. Transactions ──────────────────────────────────────────────────────
     transaction_records: List[Transaction] = []
@@ -152,7 +100,7 @@ def _save_bank_statement_sync(
             "date": safe_parse_date(t.get("date")),
         })
 
-    db.flush()  # obtain transaction IDs
+    await db.flush()  # obtain transaction IDs
 
     for i, tx_record in enumerate(transaction_records):
         chunking_data[i]["id"] = tx_record.id
@@ -162,12 +110,12 @@ def _save_bank_statement_sync(
     account_holder_name = account_data.get("account_holder_name", "")
     logger.info("Chunking complete | account=%s | chunks=%d", account_record.id, len(chunks))
 
-    _save_chunks_with_embeddings(
+    await save_chunks_with_embeddings(
         db, chunks, account_holder_name, user_id, account_record.id
     )
 
     # ── 7. Commit ────────────────────────────────────────────────────────────
-    db.commit()
+    await db.commit()
     logger.info(
         "Statement saved | account=%s | transactions=%d | chunks=%d",
         account_record.id,
@@ -177,8 +125,8 @@ def _save_bank_statement_sync(
     return account_record.id
 
 
-def _save_chunks_with_embeddings(
-    db: Session,
+async def save_chunks_with_embeddings(
+    db: AsyncSession,
     chunks: List[Any],
     account_holder_name: str,
     user_id: UUID,
@@ -186,13 +134,16 @@ def _save_chunks_with_embeddings(
 ) -> None:
     """
     Embed each chunk, persist Chunk records, then stitch them into a linked list.
+    Runs embeddings asynchronously if needed, or yields back context.
     """
     chunk_records: List[Chunk] = []
 
+    # Note: embed_text_async connects directly to Gemini externally over async bindings natively.
+
     for chunk in chunks:
         try:
-            desc_embedding = embed_text(chunk.chunk_text)
-            holder_embedding = embed_text(account_holder_name)
+            desc_embedding = await embed_text_async(chunk.chunk_text)
+            holder_embedding = await embed_text_async(account_holder_name)
         except Exception as exc:
             logger.error(
                 "Embedding failed for chunk %d — saving without embeddings | error=%s",
@@ -221,7 +172,7 @@ def _save_chunks_with_embeddings(
         db.add(chunk_record)
         chunk_records.append(chunk_record)
 
-    db.flush()  # obtain chunk_id for every record
+    await db.flush()  # obtain chunk_id for every record
 
     # Link chunks into a doubly-linked list
     for i, chunk_record in enumerate(chunk_records):
@@ -230,20 +181,22 @@ def _save_chunks_with_embeddings(
         if i < len(chunk_records) - 1:
             chunk_record.next_chunk = chunk_records[i + 1].chunk_id
 
-    db.flush()
+    await db.flush()
 
 
 # ---------------------------------------------------------------------------
-# Pure query helpers (thin wrappers around SQLAlchemy queries)
+# Pure query helpers natively async
 # ---------------------------------------------------------------------------
 
-def _get_account_by_id_sync(
-    db: Session, account_id: UUID
+async def get_account_by_id(
+    db: AsyncSession, account_id: UUID
 ) -> Optional[AccountDetails]:
-    return db.query(AccountDetails).filter(AccountDetails.id == account_id).first()
+    result = await db.execute(select(AccountDetails).filter(AccountDetails.id == account_id))
+    return result.scalars().first()
 
 
-def _get_user_accounts_sync(
-    db: Session, user_id: UUID
+async def get_user_accounts(
+    db: AsyncSession, user_id: UUID
 ) -> List[AccountDetails]:
-    return db.query(AccountDetails).filter(AccountDetails.user_id == user_id).all()
+    result = await db.execute(select(AccountDetails).filter(AccountDetails.user_id == user_id))
+    return list(result.scalars().all())

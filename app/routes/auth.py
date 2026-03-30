@@ -1,40 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 
 from app.db.base import SessionLocal
 from app.service.auth_service import create_user, authenticate_user
 from app.utils.security import create_access_token
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+from app.schema.auth import SignupRequest, LoginRequest, AuthResponse
+from app.utils.dependencies import get_db
 
 router = APIRouter()
 
-class SignupRequest(BaseModel):
-    username: str
-    email: EmailStr
-    password: str
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-class AuthResponse(BaseModel):
-    user_id: UUID
-    username: str
-    email: str
-    message: str
-    access_token: str | None = None
-    token_type: str | None = None
-
 @router.post("/signup", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-async def signup(request: SignupRequest, db: Session = Depends(get_db)):
+async def signup(request: SignupRequest, db: AsyncSession = Depends(get_db)):
     """Register a new user with a unique username and email."""
     try:
         user = await create_user(
@@ -61,7 +39,7 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
         )
 
 @router.post("/login", response_model=AuthResponse)
-async def login(request: LoginRequest, db: Session = Depends(get_db)):
+async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Authenticate an existing user via email and password and issue a JWT token."""
     try:
         user = await authenticate_user(

@@ -6,24 +6,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import SessionLocal
 from app.service.chatbot_service import chat_with_statements
 from app.utils.logger import get_logger
-from app.utils.security import get_current_user_id
+from app.utils.dependencies import get_db, get_current_user_id
 
 logger = get_logger(__name__)
 router = APIRouter()
-
-
-def get_db():
-    """Database session dependency."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 @router.post("/chat")
@@ -31,7 +22,7 @@ async def chat_endpoint(
     account_id: str = Query(..., description="UUID of the account to query against"),
     query: str = Query(..., description="Natural language question about the bank statement"),
     top_k: int = Query(5, ge=1, le=10, description="Number of top chunks for context (1–10)"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user_id: UUID = Depends(get_current_user_id),
 ):
     """

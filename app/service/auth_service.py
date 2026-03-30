@@ -1,6 +1,6 @@
 import logging
 from passlib.context import CryptContext
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.models.user import User
@@ -17,12 +17,13 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain-text password against the stored hash."""
     return pwd_context.verify(plain_password, hashed_password)
 
-async def create_user(db: Session, username: str, email: str, password: str) -> User:
+async def create_user(db: AsyncSession, username: str, email: str, password: str) -> User:
     """
     Create a new user with unique username and email.
     """
     # Check uniqueness
-    existing_user = db.execute(select(User).filter((User.username == username) | (User.email == email))).scalars().first()
+    result = await db.execute(select(User).filter((User.username == username) | (User.email == email)))
+    existing_user = result.scalars().first()
     if existing_user:
         if existing_user.username == username:
             raise ValueError("Username is already taken.")
@@ -38,18 +39,19 @@ async def create_user(db: Session, username: str, email: str, password: str) -> 
     )
     
     db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    await db.commit()
+    await db.refresh(new_user)
     
     logger.info(f"User created | username={username} | email={email}")
     return new_user
 
-async def authenticate_user(db: Session, email: str, password: str) -> User:
+async def authenticate_user(db: AsyncSession, email: str, password: str) -> User:
     """
     Authenticate a user by email and password.
     Returns the User object if successful, raises ValueError otherwise.
     """
-    user = db.execute(select(User).filter(User.email == email)).scalars().first()
+    result = await db.execute(select(User).filter(User.email == email))
+    user = result.scalars().first()
     if not user:
         raise ValueError("Invalid email or password.")
         

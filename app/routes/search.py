@@ -5,43 +5,32 @@ Semantic search over bank statement chunks
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from uuid import UUID
-import asyncio
 
 from app.db.base import SessionLocal
-from app.db.vector import embed_text
+from app.db.vector import embed_text_async
 from app.utils.logger import get_logger
-from app.utils.security import get_current_user_id
+from app.utils.dependencies import get_db, get_current_user_id
 
 logger = get_logger(__name__)
 router = APIRouter()
 
 
-def get_db():
-    """Database session dependency"""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-def _search_chunks_sync(
-    db: Session,
+async def _search_chunks_async(
+    db: AsyncSession,
     query: str,
     user_id: str,
     account_id: UUID,
     limit: int = 5
 ) -> list:
     """
-    Synchronous chunk search using vector similarity.
-    Runs in thread pool from async context.
+    Asynchronous chunk search using semantic vector similarity natively via pgvector.
     """
     try:
         # Generate query embedding
-        query_embedding = embed_text(query)
+        query_embedding = await embed_text_async(query)
         
         # Convert to string format for PostgreSQL
         embedding_str = str(query_embedding)
@@ -62,12 +51,13 @@ def _search_chunks_sync(
             LIMIT :limit
         """)
         
-        results = db.execute(
+        result = await db.execute(
             sql,
             {"query_embedding": embedding_str, "account_id": str(account_id), "user_id": user_id, "limit": limit}
-        ).fetchall()
+        )
+        rows = result.fetchall()
         
-        return [dict(row._mapping) for row in results]
+        return [dict(row._mapping) for row in rows]
         
     except Exception as e:
         logger.error(f"Search error: {str(e)}")
@@ -75,24 +65,20 @@ def _search_chunks_sync(
 
 
 async def search_chunks(
-    db: Session,
+    db: AsyncSession,
     query: str,
     user_id: UUID,
     account_id: UUID,
     limit: int = 5
 ) -> list:
     """Async wrapper for chunk search."""
-    loop = asyncio.get_running_loop()
-    results = await loop.run_in_executor(
-        None,
-        _search_chunks_sync,
+    return await _search_chunks_async(
         db,
         query,
         str(user_id),
         account_id,
         limit
     )
-    return results
 
 
 @router.post("/search-statements")
@@ -100,7 +86,7 @@ async def search_bank_statements(
     account_id: str = Query(..., description="UUID of the account"),
     query: str = Query(..., description="Search query"),
     limit: int = Query(5, ge=1, le=20),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user_id: UUID = Depends(get_current_user_id)
 ):
     """

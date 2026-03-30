@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Tuple, Dict, Any
 from uuid import UUID
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 import google.generativeai as genai
 
 from app.core.config import get_settings
@@ -56,7 +56,7 @@ Return ONLY a valid JSON object — no markdown, no extra text:
 
 async def extract_pdf_with_gemini(
     uploaded_pdf,
-    db: Session,
+    db: AsyncSession,
     original_filename: str,
     user_id: UUID,
 ) -> Tuple[UUID, str, Dict[str, Any]]:

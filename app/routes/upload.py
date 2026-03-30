@@ -5,33 +5,23 @@ Clean, async endpoint implementations
 
 from fastapi import APIRouter, UploadFile, File, Depends, Query, HTTPException
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 import logging
 
 from app.db.base import SessionLocal
 from app.service.extract_service import extract_pdf_with_gemini
 from app.utils.logger import get_logger
-from app.utils.security import get_current_user_id
-from app.utils.security import get_current_user_id
+from app.utils.dependencies import get_db, get_current_user_id
 
 logger = get_logger(__name__)
 router = APIRouter()
 
 
-def get_db():
-    """Database session dependency"""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 @router.post("/upload-bank-statement")
 async def upload_bank_statement(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user_uuid: UUID = Depends(get_current_user_id)
 ):
     """

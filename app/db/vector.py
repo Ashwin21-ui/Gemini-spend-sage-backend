@@ -8,15 +8,11 @@ logger = get_logger(__name__)
 load_dotenv(override=True)
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-def embed_text(text: str):
-    """Generate vector embedding for a DOCUMENT using Google's Generative AI API.
-
-    Use this when indexing content (chunks, descriptions).
-    Returns 3072-dimensional vectors (gemini-embedding-001).
-    """
+async def embed_text_async(text: str):
+    """Generate vector embedding for a DOCUMENT using Google's Generative AI API natively async."""
     try:
-        logger.debug("[VECTOR] Generating document embedding (%d chars)...", len(text))
-        result = genai.embed_content(
+        logger.debug("[VECTOR] Generating async document embedding (%d chars)...", len(text))
+        result = await genai.embed_content_async(
             model="models/gemini-embedding-001",
             content=text,
             task_type="retrieval_document",
@@ -29,17 +25,11 @@ def embed_text(text: str):
         raise
 
 
-def embed_query(text: str):
-    """Generate vector embedding for a QUERY using Google's Generative AI API.
-
-    Use this at search/retrieval time — task_type='retrieval_query' produces
-    vectors in the same space as retrieval_document embeddings but optimised
-    for short query strings rather than long documents.
-    Returns 3072-dimensional vectors.
-    """
+async def embed_query_async(text: str):
+    """Generate vector embedding for a QUERY natively async."""
     try:
-        logger.debug("[VECTOR] Generating query embedding (%d chars)...", len(text))
-        result = genai.embed_content(
+        logger.debug("[VECTOR] Generating async query embedding (%d chars)...", len(text))
+        result = await genai.embed_content_async(
             model="models/gemini-embedding-001",
             content=text,
             task_type="retrieval_query",
