@@ -143,3 +143,19 @@ async def check_resend_cooldown(db: AsyncSession, email: str, purpose: str) -> N
         if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
             remaining = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
             raise ValueError(f"Please wait {remaining} seconds before requesting a new OTP.")
+
+
+async def reset_password(db: AsyncSession, email: str, new_password: str) -> User:
+    """
+    Reset user password after OTP verification.
+    """
+    result = await db.execute(select(User).filter(User.email == email))
+    user = result.scalars().first()
+    if not user:
+        raise ValueError("User not found.")
+    
+    user.password_hash = hash_password(new_password)
+    await db.commit()
+    await db.refresh(user)
+    logger.info(f"Password reset | email={email}")
+    return user

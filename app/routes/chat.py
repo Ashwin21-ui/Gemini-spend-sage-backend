@@ -65,7 +65,7 @@ async def chat_endpoint(
             db=db,
             user_id=current_user_id,
             account_id=account_uuid,
-            query=query.strip(),
+            query=request.query.strip(),
             top_k=request.top_k,
         )
     except Exception as exc:

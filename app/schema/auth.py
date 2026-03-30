@@ -37,3 +37,14 @@ class AuthResponse(BaseModel):
 class OTPSentResponse(BaseModel):
     message: str
     email: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp_code: str
+    new_password: str
+    confirm_password: str

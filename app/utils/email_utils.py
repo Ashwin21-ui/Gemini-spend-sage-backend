@@ -13,7 +13,12 @@ logger = logging.getLogger(__name__)
 
 def _build_otp_html(otp_code: str, purpose: str) -> str:
     """Build a clean, branded HTML email template for OTP delivery."""
-    action = "verify your account" if purpose == "signup" else "log in"
+    if purpose == "signup":
+        action = "verify your account"
+    elif purpose == "password_reset":
+        action = "reset your password"
+    else:  # login
+        action = "log in"
     return f"""
 <!DOCTYPE html>
 <html lang="en">

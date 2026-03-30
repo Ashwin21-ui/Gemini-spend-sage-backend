@@ -18,6 +18,7 @@ from app.service.auth_service import (
     create_otp,
     verify_otp,
     check_resend_cooldown,
+    reset_password,
 )
 from app.utils.email_utils import send_otp_email
 from app.schema.auth import (
@@ -27,6 +28,8 @@ from app.schema.auth import (
     OTPResendRequest,
     AuthResponse,
     OTPSentResponse,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
 )
 
 router = APIRouter()
@@ -134,3 +137,47 @@ async def resend_otp(request: OTPResendRequest, db: AsyncSession = Depends(get_d
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to send OTP: {str(e)}")
 
     return OTPSentResponse(message="A new OTP has been sent to your email.", email=request.email)
+
+
+@router.post("/forgot-password", response_model=OTPSentResponse)
+async def forgot_password(request: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Step 1 of Password Reset — validates email exists and sends an OTP.
+    """
+    # Verify user exists
+    result = await db.execute(select(User).filter(User.email == request.email))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No account found with this email.")
+
+    try:
+        code = await create_otp(db=db, email=request.email, purpose="password_reset")
+        await send_otp_email(email=request.email, otp_code=code, purpose="password_reset")
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to send OTP: {str(e)}")
+
+    return OTPSentResponse(message="OTP sent to your email. Please verify to reset your password.", email=request.email)
+
+
+@router.post("/reset-password", response_model=OTPSentResponse)
+async def reset_password_endpoint(request: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Step 2 of Password Reset — verifies OTP and updates the password.
+    """
+    if request.new_password != request.confirm_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Passwords do not match.")
+
+    if len(request.new_password) < 8:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters long.")
+
+    try:
+        await verify_otp(db=db, email=request.email, otp_code=request.otp_code, purpose="password_reset")
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    try:
+        await reset_password(db=db, email=request.email, new_password=request.new_password)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+    return OTPSentResponse(message="Password reset successfully. Please login with your new password.", email=request.email)
