@@ -4,8 +4,9 @@ Chat API Route — GraphRAG Pipeline for Bank Statement QA
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import SessionLocal
@@ -17,11 +18,14 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+class ChatRequest(BaseModel):
+    account_id: str = Field(..., description="UUID of the account to query")
+    query: str = Field(..., description="Natural language question")
+    top_k: int = Field(5, ge=1, le=10, description="Number of chunks")
+
 @router.post("/chat")
 async def chat_endpoint(
-    account_id: str = Query(..., description="UUID of the account to query against"),
-    query: str = Query(..., description="Natural language question about the bank statement"),
-    top_k: int = Query(5, ge=1, le=10, description="Number of top chunks for context (1–10)"),
+    request: ChatRequest,
     db: AsyncSession = Depends(get_db),
     current_user_id: UUID = Depends(get_current_user_id),
 ):
@@ -41,20 +45,20 @@ async def chat_endpoint(
     """
     # Validate account_id
     try:
-        account_uuid = UUID(account_id)
+        account_uuid = UUID(request.account_id)
     except ValueError:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid UUID format for account_id: {account_id}",
+            detail=f"Invalid UUID format for account_id: {request.account_id}",
         )
 
-    if not query or len(query.strip()) < 3:
+    if not request.query or len(request.query.strip()) < 3:
         raise HTTPException(
             status_code=400,
             detail="Query must be at least 3 characters.",
         )
 
-    logger.info("Chat request | account=%s | query=%r | top_k=%d", account_uuid, query[:80], top_k)
+    logger.info("Chat request | account=%s | query=%r | top_k=%d", account_uuid, request.query[:80], request.top_k)
 
     try:
         result = await chat_with_statements(
@@ -62,7 +66,7 @@ async def chat_endpoint(
             user_id=current_user_id,
             account_id=account_uuid,
             query=query.strip(),
-            top_k=top_k,
+            top_k=request.top_k,
         )
     except Exception as exc:
         logger.error("Chat pipeline failed | error=%s", exc, exc_info=True)

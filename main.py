@@ -15,6 +15,7 @@ from app.routes.upload import router as upload_router
 from app.routes.search import router as search_router
 from app.routes.chat import router as chat_router
 from app.routes.auth import router as auth_router
+from app.routes.user_data import router as user_data_router
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -55,6 +56,7 @@ app.add_middleware(
 app.include_router(upload_router, prefix="/api", tags=["Upload"])
 app.include_router(search_router, prefix="/api", tags=["Search"])
 app.include_router(chat_router, prefix="/api", tags=["Chat"])
+app.include_router(user_data_router, prefix="/api", tags=["User Data"])
 app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 
 
