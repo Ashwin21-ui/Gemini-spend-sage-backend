@@ -8,6 +8,8 @@ from sqlalchemy import select
 from uuid import UUID
 
 from app.models.chunk import Chunk
+from app.models.account import AccountDetails
+from app.models.transaction import Transaction
 from app.utils.dependencies import get_db, get_current_user_id
 from app.utils.logger import get_logger
 
@@ -38,3 +40,87 @@ async def check_user_data(
             raise e
         logger.error(f"Failed resolving user mapping checks: {e}")
         raise HTTPException(status_code=500, detail="Failed checking user data.")
+
+
+@router.get("/user-data/accounts")
+async def get_user_accounts(
+    db: AsyncSession = Depends(get_db),
+    current_user_id: UUID = Depends(get_current_user_id),
+):
+    """
+    Get all uploaded bank statements (accounts) for the current user.
+    Used by sidebar to display list of statements.
+    """
+    try:
+        query = select(AccountDetails).where(AccountDetails.user_id == current_user_id)
+        result = await db.execute(query)
+        accounts = result.scalars().all()
+
+        return {
+            "accounts": [
+                {
+                    "id": str(account.id),
+                    "account_holder_name": account.account_holder_name,
+                    "account_number": account.account_number,
+                    "bank_name": account.bank_name,
+                    "statement_start_date": account.statement_start_date.isoformat() if account.statement_start_date else None,
+                    "statement_end_date": account.statement_end_date.isoformat() if account.statement_end_date else None,
+                }
+                for account in accounts
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Failed fetching user accounts: {e}")
+        raise HTTPException(status_code=500, detail="Failed fetching accounts.")
+
+
+@router.get("/user-data/transactions/{account_id}")
+async def get_account_transactions(
+    account_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user_id: UUID = Depends(get_current_user_id),
+):
+    """
+    Get all transactions for a specific account.
+    Used by statements view to display transaction data.
+    """
+    try:
+        # Verify the account belongs to the current user
+        account_query = select(AccountDetails).where(
+            AccountDetails.id == account_id,
+            AccountDetails.user_id == current_user_id
+        )
+        account_result = await db.execute(account_query)
+        account = account_result.scalar_one_or_none()
+        
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+        
+        # Fetch transactions for this account
+        transactions_query = select(Transaction).where(
+            Transaction.account_id == account_id
+        ).order_by(Transaction.date.desc())
+        
+        result = await db.execute(transactions_query)
+        transactions = result.scalars().all()
+        
+        return {
+            "account_id": str(account_id),
+            "transactions": [
+                {
+                    "id": str(txn.id),
+                    "date": txn.date.isoformat() if txn.date else None,
+                    "description": txn.description,
+                    "reference_no": txn.reference_no,
+                    "amount": float(txn.amount_value) if txn.amount_value else None,
+                    "type": txn.amount_type,
+                    "balance": float(txn.balance_after_transaction) if txn.balance_after_transaction else None,
+                }
+                for txn in transactions
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed fetching transactions for account {account_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed fetching transactions.")

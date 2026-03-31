@@ -22,3 +22,4 @@ class User(Base):
     # Relationships
     accounts = relationship("AccountDetails", back_populates="user")
     chunks = relationship("Chunk", back_populates="user")
+    chats = relationship("Chat", back_populates="user", cascade="all, delete-orphan")
