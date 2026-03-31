@@ -65,6 +65,7 @@ async def get_user_accounts(
                     "bank_name": account.bank_name,
                     "statement_start_date": account.statement_start_date.isoformat() if account.statement_start_date else None,
                     "statement_end_date": account.statement_end_date.isoformat() if account.statement_end_date else None,
+                    "currency": account.currency or "INR",
                 }
                 for account in accounts
             ]
@@ -106,6 +107,7 @@ async def get_account_transactions(
         
         return {
             "account_id": str(account_id),
+            "currency": account.currency or "INR",
             "transactions": [
                 {
                     "id": str(txn.id),

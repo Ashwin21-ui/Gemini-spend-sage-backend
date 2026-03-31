@@ -77,8 +77,13 @@ async def upload_bank_statement(
     except HTTPException:
         raise
     except ValueError as e:
-        logger.warning("Upload rejected | file=%s | reason=%s", file.filename, str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        error_msg = str(e)
+        # Extract key details for logging
+        if "possibly truncated" in error_msg.lower():
+            logger.warning("Upload rejected | file=%s | reason=Response truncation | details=%s", file.filename, error_msg)
+        else:
+            logger.warning("Upload rejected | file=%s | reason=%s", file.filename, error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
     except Exception as e:
         logger.error(f"Error processing upload: {str(e)}", exc_info=True)
         raise HTTPException(

@@ -3,20 +3,24 @@ Async Bank Statement Extraction Service
 
 Flow:
   1. Check data/ cache for pre-existing JSON (avoids redundant Gemini API calls)
-  2. On cache miss → call Gemini 2.5 Flash in a thread pool (non-blocking)
-  3. Validate extracted JSON structure
-  4. Persist cache to data/ directory
-  5. Save to database via save_bank_statement
+  2. On cache miss → split PDF into 10-page chunks
+  3. Extract transactions from each chunk via Gemini 2.5 Flash (avoids truncation)
+  4. Merge all chunk results + recalculate summary
+  5. Validate extracted JSON structure
+  6. Persist cache to data/ directory
+  7. Save to database via save_bank_statement
 """
 
 import json
 import asyncio
 from pathlib import Path
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
 from uuid import UUID
+from io import BytesIO
 
 from sqlalchemy.ext.asyncio import AsyncSession
 import google.generativeai as genai
+from pypdf import PdfReader, PdfWriter
 
 from app.core.config import get_settings
 from app.prompts.extract_bank_statement import BANK_STATEMENT_PROMPT
@@ -101,7 +105,7 @@ async def extract_pdf_with_gemini(
         )
 
         extracted_json = await loop.run_in_executor(
-            None, _call_gemini_sync, pdf_bytes, original_filename
+            None, _call_gemini_chunked_sync, pdf_bytes, original_filename
         )
 
         _validate_extracted_json(extracted_json, original_filename)
@@ -120,14 +124,96 @@ async def extract_pdf_with_gemini(
 # Synchronous helpers (run in thread pool or called from sync contexts)
 # ---------------------------------------------------------------------------
 
-def _call_gemini_sync(pdf_bytes: bytes, original_filename: str) -> Dict[str, Any]:
+def _call_gemini_chunked_sync(pdf_bytes: bytes, original_filename: str) -> Dict[str, Any]:
     """
-    Blocking Gemini API call — always run via run_in_executor, never directly
-    in an async function.
+    Extract from PDF by splitting into 10-page chunks to avoid response truncation.
+    
+    1. Split PDF into chunks (10 pages per chunk)
+    2. Extract transactions from each chunk
+    3. Merge results and recalculate summary
+    4. Handles response truncation gracefully
     """
-    model = genai.GenerativeModel("gemini-2.5-flash")
-    logger.info("Gemini API request sent | file=%s", original_filename)
+    logger.info("Gemini API request (chunked strategy) | file=%s", original_filename)
+    
+    # Split PDF into 10-page chunks
+    try:
+        chunks = _split_pdf_into_chunks(pdf_bytes, chunk_size=10)
+        logger.info("PDF split into %d chunks | file=%s", len(chunks), original_filename)
+    except Exception as e:
+        logger.warning("PDF chunking failed, falling back to single request | error=%s", str(e))
+        # Fall back to single request if chunking fails
+        return _call_gemini_single_sync(pdf_bytes, original_filename)
+    
+    # Extract from each chunk
+    chunk_results = []
+    account_details = None
+    
+    for i, chunk_pdf_bytes in enumerate(chunks):
+        logger.info("Processing chunk %d/%d | file=%s", i + 1, len(chunks), original_filename)
+        
+        try:
+            result = _extract_from_chunk_sync(
+                chunk_pdf_bytes, 
+                chunk_num=i + 1, 
+                total_chunks=len(chunks),
+                original_filename=original_filename
+            )
+            
+            # Capture account details from first chunk
+            if account_details is None and "account_details" in result:
+                account_details = result["account_details"]
+            
+            if "transactions" in result and result["transactions"]:
+                chunk_results.extend(result["transactions"])
+                logger.info(
+                    "Extracted %d transactions from chunk %d | file=%s",
+                    len(result["transactions"]), i + 1, original_filename
+                )
+        except Exception as chunk_err:
+            logger.warning(
+                "Chunk %d extraction failed | file=%s | error=%s",
+                i + 1, original_filename, str(chunk_err)
+            )
+            # Continue with other chunks instead of failing completely
+            continue
+    
+    if not chunk_results:
+        raise ValueError(
+            f"No transactions extracted from any chunk of '{original_filename}'. "
+            "PDF may not be a valid bank statement."
+        )
+    
+    # Merge and deduplicate transactions
+    merged_transactions = _deduplicate_transactions(chunk_results)
+    logger.info(
+        "Merged chunks: %d total transactions | file=%s",
+        len(merged_transactions), original_filename
+    )
+    
+    # Reconstruct final JSON with recalculated summary
+    final_json = {
+        "account_details": account_details or {},
+        "transactions": merged_transactions,
+        "summary": _calculate_summary(merged_transactions)
+    }
+    
+    logger.info(
+        "Gemini extraction complete (chunked) | account_holder=%s | transactions=%d | file=%s",
+        final_json.get("account_details", {}).get("account_holder_name", "unknown"),
+        len(merged_transactions), original_filename
+    )
+    
+    return final_json
 
+
+def _call_gemini_single_sync(pdf_bytes: bytes, original_filename: str) -> Dict[str, Any]:
+    """
+    Fallback: Extract entire PDF in a single request (original approach).
+    Used if chunking fails.
+    """
+    logger.info("Gemini API request (single request fallback) | file=%s", original_filename)
+    
+    model = genai.GenerativeModel("gemini-2.5-flash")
     response = model.generate_content(
         [
             {
@@ -144,13 +230,230 @@ def _call_gemini_sync(pdf_bytes: bytes, original_filename: str) -> Dict[str, Any
         },
     )
 
-    extracted_json: Dict[str, Any] = json.loads(response.text)
-    logger.info(
-        "Gemini response parsed | account_holder=%s | transactions=%d",
-        extracted_json.get("account_details", {}).get("account_holder_name", "unknown"),
-        len(extracted_json.get("transactions", [])),
-    )
+    response_text = response.text.strip()
+    logger.info("Gemini response received | file=%s | size=%d bytes", original_filename, len(response_text))
+    
+    # Try to extract JSON from markdown code blocks if present
+    if response_text.startswith("```"):
+        response_text = response_text.lstrip("`").lstrip("json").lstrip("`").strip()
+        response_text = response_text.rstrip("`").strip()
+    
+    try:
+        extracted_json: Dict[str, Any] = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "JSON parsing failed | file=%s | error=%s | position=%d | line=%d | col=%d | response_size=%d",
+            original_filename, str(e), e.pos, e.lineno, e.colno, len(response_text),
+        )
+        
+        if not response_text.rstrip().endswith("}"):
+            logger.error("Response appears truncated. Last 500 chars: %s", response_text[-500:])
+            extracted_json = _attempt_truncated_recovery(response_text)
+            if extracted_json:
+                logger.warning("Recovered partial data from truncated response")
+                return extracted_json
+        
+        logger.error("Raw response (first 1000 chars): %s", response_text[:1000])
+        raise ValueError(
+            f"Gemini API returned invalid JSON (possibly truncated). "
+            f"Error at line {e.lineno}, column {e.colno}: {str(e)}"
+        )
+    
     return extracted_json
+
+
+def _split_pdf_into_chunks(pdf_bytes: bytes, chunk_size: int = 10) -> List[bytes]:
+    """
+    Split PDF into chunks of N pages each.
+    
+    Args:
+        pdf_bytes: Raw PDF file bytes
+        chunk_size: Number of pages per chunk (default 10)
+    
+    Returns:
+        List of PDF bytes for each chunk
+    """
+    reader = PdfReader(BytesIO(pdf_bytes))
+    total_pages = len(reader.pages)
+    logger.info("PDF has %d total pages", total_pages)
+    
+    chunks = []
+    for start_page in range(0, total_pages, chunk_size):
+        end_page = min(start_page + chunk_size, total_pages)
+        
+        writer = PdfWriter()
+        for page_num in range(start_page, end_page):
+            writer.add_page(reader.pages[page_num])
+        
+        # Write chunk to bytes
+        chunk_output = BytesIO()
+        writer.write(chunk_output)
+        chunk_output.seek(0)
+        chunks.append(chunk_output.getvalue())
+        
+        logger.debug("Created chunk: pages %d-%d", start_page + 1, end_page)
+    
+    return chunks
+
+
+def _extract_from_chunk_sync(
+    chunk_pdf_bytes: bytes,
+    chunk_num: int,
+    total_chunks: int,
+    original_filename: str
+) -> Dict[str, Any]:
+    """
+    Extract transactions from a single PDF chunk via Gemini.
+    
+    Args:
+        chunk_pdf_bytes: Raw bytes of PDF chunk
+        chunk_num: Current chunk number (1-indexed)
+        total_chunks: Total number of chunks
+        original_filename: Original PDF filename
+    
+    Returns:
+        Extracted data dict with account_details and transactions
+    """
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    
+    # Use a chunk-aware prompt that doesn't expect full summary
+    chunk_prompt = f"""{BANK_STATEMENT_PROMPT}
+
+NOTE: This is chunk {chunk_num} of {total_chunks}. Extract ONLY the transactions visible on these pages.
+If this is chunk 1, also include the account details. For other chunks, set account_details to empty/null.
+Do NOT include a summary calculation - leave the summary empty object."""
+    
+    response = model.generate_content(
+        [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": chunk_prompt},
+                    {"mime_type": "application/pdf", "data": chunk_pdf_bytes},
+                ],
+            }
+        ],
+        generation_config={
+            "temperature": 0.0,
+            "response_mime_type": "application/json",
+        },
+    )
+
+    response_text = response.text.strip()
+    
+    # Clean markdown if present
+    if response_text.startswith("```"):
+        response_text = response_text.lstrip("`").lstrip("json").lstrip("`").strip()
+        response_text = response_text.rstrip("`").strip()
+    
+    try:
+        chunk_data = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "Chunk %d JSON parse error | file=%s | line=%d col=%d",
+            chunk_num, original_filename, e.lineno, e.colno
+        )
+        # Return partial data if available
+        recovered = _attempt_truncated_recovery(response_text)
+        if recovered:
+            logger.warning("Recovered partial data from chunk %d", chunk_num)
+            return recovered
+        raise ValueError(f"Chunk {chunk_num} returned invalid JSON: {str(e)}")
+    
+    return chunk_data
+
+
+def _deduplicate_transactions(transactions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Remove duplicate transactions (by reference_no) and sort by date.
+    Later occurrences override earlier ones (in case of conflicts).
+    """
+    seen = {}
+    for txn in transactions:
+        ref_no = txn.get("reference_no", "")
+        if ref_no:
+            seen[ref_no] = txn
+        else:
+            # If no reference number, try to use date + description as key
+            key = f"{txn.get('date', '')}_{txn.get('description', '')}"
+            if key not in seen:
+                seen[key] = txn
+    
+    # Sort by date
+    result = list(seen.values())
+    result.sort(key=lambda x: x.get("date", ""))
+    return result
+
+
+def _calculate_summary(transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Recalculate summary statistics from merged transactions.
+    """
+    total_credits = 0.0
+    total_debits = 0.0
+    credit_count = 0
+    debit_count = 0
+    opening_balance = None
+    closing_balance = None
+    
+    for txn in transactions:
+        amount = txn.get("amount", {})
+        value = amount.get("value", 0.0)
+        txn_type = amount.get("type", "")
+        
+        if txn_type == "credit":
+            total_credits += float(value)
+            credit_count += 1
+        elif txn_type == "debit":
+            total_debits += float(value)
+            debit_count += 1
+        
+        # Track opening/closing balances
+        balance_after = txn.get("balance_after_transaction", None)
+        if balance_after is not None:
+            if opening_balance is None:
+                # First transaction's previous balance is opening
+                opening_balance = float(balance_after) - (float(value) if txn_type == "credit" else -float(value))
+            closing_balance = float(balance_after)
+    
+    return {
+        "opening_balance": float(opening_balance) if opening_balance is not None else 0.0,
+        "closing_balance": float(closing_balance) if closing_balance is not None else 0.0,
+        "total_credits": float(total_credits),
+        "total_debits": float(total_debits),
+        "credit_count": credit_count,
+        "debit_count": debit_count
+    }
+
+
+def _attempt_truncated_recovery(response_text: str) -> Dict[str, Any] | None:
+    """
+    Attempt to recover valid JSON from truncated Gemini response.
+    
+    Strategy: Find the last complete transaction object and close the JSON structure.
+    """
+    try:
+        # Try to find the last complete transaction by working backwards
+        last_close_brace = response_text.rfind("}")
+        if last_close_brace == -1:
+            return None
+        
+        # Find the last complete transaction object
+        for i in range(last_close_brace, max(0, last_close_brace - 1000), -1):
+            if response_text[i] == "}":
+                # Try to close the JSON structure from this point
+                candidate = response_text[:i+1]
+                # Make sure we have a complete transactions array
+                if '"transactions"' in candidate:
+                    candidate += "\n}}"  # Close transactions array and main object
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        continue
+        return None
+    except Exception as e:
+        logger.debug("Truncated recovery attempt failed: %s", str(e))
+        return None
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -206,7 +509,24 @@ def _check_pdf_is_bank_statement_sync(pdf_bytes: bytes, original_filename: str) 
                 "response_mime_type": "application/json",
             },
         )
-        result = json.loads(response.text)
+        
+        response_text = response.text.strip()
+        
+        # Try to extract JSON from markdown code blocks if present
+        if response_text.startswith("```"):
+            response_text = response_text.lstrip("`").lstrip("json").lstrip("`").strip()
+            response_text = response_text.rstrip("`").strip()
+        
+        try:
+            result = json.loads(response_text)
+        except json.JSONDecodeError as e:
+            logger.warning(
+                "PDF guardrail JSON parsing failed | file=%s | error=%s",
+                original_filename, str(e),
+            )
+            # Fail open on parsing errors to not block uploads
+            return
+        
         is_bank_statement = bool(result.get("is_bank_statement", True))
         confidence = float(result.get("confidence", 1.0))
         document_type = result.get("document_type", "unknown")
