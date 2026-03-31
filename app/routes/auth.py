@@ -4,8 +4,10 @@ Auth Routes — Login, Signup, OTP Verification, and Resend endpoints.
 Flow:
   Signup: POST /signup → sends OTP → POST /verify-otp → JWT issued
   Login:  POST /login  → sends OTP → POST /verify-otp → JWT issued
+
+Note: Email sending is handled asynchronously in background tasks to avoid blocking the response.
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -36,9 +38,9 @@ router = APIRouter()
 
 
 @router.post("/signup", response_model=OTPSentResponse, status_code=status.HTTP_201_CREATED)
-async def signup(request: SignupRequest, db: AsyncSession = Depends(get_db)):
+async def signup(request: SignupRequest, db: AsyncSession = Depends(get_db), background_tasks: BackgroundTasks = BackgroundTasks()):
     """
-    Step 1 of Signup — creates the user account and sends an OTP.
+    Step 1 of Signup — creates the user account and sends an OTP asynchronously.
     The JWT is only issued after the OTP is verified.
     """
     try:
@@ -50,17 +52,18 @@ async def signup(request: SignupRequest, db: AsyncSession = Depends(get_db)):
 
     try:
         code = await create_otp(db=db, email=request.email, purpose="signup")
-        await send_otp_email(email=request.email, otp_code=code, purpose="signup")
+        # Send email asynchronously — don't block the response
+        background_tasks.add_task(send_otp_email, email=request.email, otp_code=code, purpose="signup")
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to send OTP: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to create OTP: {str(e)}")
 
     return OTPSentResponse(message="Account created. Check your email for the verification code.", email=request.email)
 
 
 @router.post("/login", response_model=OTPSentResponse)
-async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(request: LoginRequest, db: AsyncSession = Depends(get_db), background_tasks: BackgroundTasks = BackgroundTasks()):
     """
-    Step 1 of Login — validates credentials, then sends an OTP.
+    Step 1 of Login — validates credentials, then sends an OTP asynchronously.
     The JWT is only issued after the OTP is verified.
     """
     try:
@@ -72,9 +75,10 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     try:
         code = await create_otp(db=db, email=request.email, purpose="login")
-        await send_otp_email(email=request.email, otp_code=code, purpose="login")
+        # Send email asynchronously — don't block the response
+        background_tasks.add_task(send_otp_email, email=request.email, otp_code=code, purpose="login")
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to send OTP: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to create OTP: {str(e)}")
 
     return OTPSentResponse(message="OTP sent to your email. Please verify to complete login.", email=request.email)
 
@@ -115,9 +119,10 @@ async def verify_otp_endpoint(request: OTPVerifyRequest, db: AsyncSession = Depe
 
 
 @router.post("/resend-otp", response_model=OTPSentResponse)
-async def resend_otp(request: OTPResendRequest, db: AsyncSession = Depends(get_db)):
+async def resend_otp(request: OTPResendRequest, db: AsyncSession = Depends(get_db), background_tasks: BackgroundTasks = BackgroundTasks()):
     """
     Resend a new OTP. Enforces a 60-second cooldown per email+purpose.
+    Email is sent asynchronously to avoid blocking the response.
     """
     # Verify user exists before sending
     result = await db.execute(select(User).filter(User.email == request.email))
@@ -132,17 +137,18 @@ async def resend_otp(request: OTPResendRequest, db: AsyncSession = Depends(get_d
 
     try:
         code = await create_otp(db=db, email=request.email, purpose=request.purpose)
-        await send_otp_email(email=request.email, otp_code=code, purpose=request.purpose)
+        # Send email asynchronously — don't block the response
+        background_tasks.add_task(send_otp_email, email=request.email, otp_code=code, purpose=request.purpose)
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to send OTP: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to create OTP: {str(e)}")
 
     return OTPSentResponse(message="A new OTP has been sent to your email.", email=request.email)
 
 
 @router.post("/forgot-password", response_model=OTPSentResponse)
-async def forgot_password(request: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+async def forgot_password(request: ForgotPasswordRequest, db: AsyncSession = Depends(get_db), background_tasks: BackgroundTasks = BackgroundTasks()):
     """
-    Step 1 of Password Reset — validates email exists and sends an OTP.
+    Step 1 of Password Reset — validates email exists and sends an OTP asynchronously.
     """
     # Verify user exists
     result = await db.execute(select(User).filter(User.email == request.email))
@@ -152,9 +158,10 @@ async def forgot_password(request: ForgotPasswordRequest, db: AsyncSession = Dep
 
     try:
         code = await create_otp(db=db, email=request.email, purpose="password_reset")
-        await send_otp_email(email=request.email, otp_code=code, purpose="password_reset")
+        # Send email asynchronously — don't block the response
+        background_tasks.add_task(send_otp_email, email=request.email, otp_code=code, purpose="password_reset")
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to send OTP: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to create OTP: {str(e)}")
 
     return OTPSentResponse(message="OTP sent to your email. Please verify to reset your password.", email=request.email)
 
